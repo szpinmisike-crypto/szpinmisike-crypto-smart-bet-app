@@ -1,155 +1,138 @@
-import streamlit as st
-import json
-import os
+import cv2
+import pytesseract
+import numpy as np
+import pyautogui
+import time
+import threading
+import tkinter as tk
 
-st.set_page_config(page_title="Smart Bet Tracker PRO", layout="centered")
+# Ha nem találja:
+# pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"
 
-DATA_FILE = "data.json"
+REGION = (680, 600, 220, 160)
 
-# -----------------------
-# LOAD / SAVE
-# -----------------------
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    return {"bankroll": 10000, "history": []}
+history = []
+running = True
 
-def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f)
+bankroll = 10000
+stop_loss = 7000
 
-data = load_data()
+# -------------------------
 
-# -----------------------
-# SESSION STATE
-# -----------------------
-if "bankroll" not in st.session_state:
-    st.session_state.bankroll = data["bankroll"]
+def get_signal():
+    if len(history) < 5:
+        return "WAIT", "white"
 
-if "history" not in st.session_state:
-    st.session_state.history = data["history"]
+    last = history[-5:]
+    low = sum(1 for x in last if x < 1.5)
+    high = sum(1 for x in last if x > 2.5)
 
-# -----------------------
-# HEADER
-# -----------------------
-st.title("💰 Smart Bet Tracker PRO")
-
-st.subheader(f"Bankroll: {int(st.session_state.bankroll)} Ft")
-
-# -----------------------
-# SETTINGS
-# -----------------------
-st.sidebar.title("⚙️ Beállítások")
-
-risk_mode = st.sidebar.selectbox(
-    "Kockázat szint",
-    ["Biztonságos (1%)", "Normál (2%)", "Agresszív (5%)"]
-)
-
-if "1%" in risk_mode:
-    risk = 0.01
-elif "2%" in risk_mode:
-    risk = 0.02
-else:
-    risk = 0.05
-
-stop_loss = st.sidebar.number_input("Stop Loss", value=-2000)
-take_profit = st.sidebar.number_input("Take Profit", value=3000)
-
-# -----------------------
-# STREAK ANALYSIS
-# -----------------------
-wins = 0
-losses = 0
-
-for h in reversed(st.session_state.history):
-    if h["result"] == "Nyertem":
-        if losses > 0:
-            break
-        wins += 1
+    if low >= 3:
+        return "🔴", "red"
+    elif high >= 3:
+        return "🟢", "green"
     else:
-        if wins > 0:
-            break
-        losses += 1
+        return "🟡", "yellow"
 
-# -----------------------
-# SMART BET LOGIC
-# -----------------------
-base_bet = st.session_state.bankroll * risk
+# -------------------------
 
-# adaptív mód
-if losses >= 3:
-    recommended_bet = base_bet * 0.5
-    st.warning("⚠️ Vesztes széria → tét csökkentve")
-elif wins >= 3:
-    recommended_bet = base_bet * 1.5
-    st.success("🔥 Nyerő széria → tét növelve")
-else:
-    recommended_bet = base_bet
+def extract_number(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-st.info(f"Ajánlott tét: {int(recommended_bet)} Ft")
+    thresh = cv2.adaptiveThreshold(
+        gray,255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,11,2
+    )
 
-# -----------------------
-# ADD ROUND
-# -----------------------
-st.divider()
-st.subheader("➕ Új kör")
+    text = pytesseract.image_to_string(
+        thresh,
+        config='--psm 7 -c tessedit_char_whitelist=0123456789.x'
+    )
 
-bet_input = st.number_input("Tét", value=int(recommended_bet))
-result = st.radio("Eredmény", ["Nyertem", "Vesztettem"])
+    try:
+        return float(text.replace("x","").strip())
+    except:
+        return None
 
-if st.button("Mentés"):
-    if result == "Nyertem":
-        st.session_state.bankroll += bet_input
-    else:
-        st.session_state.bankroll -= bet_input
+# -------------------------
 
-    st.session_state.history.append({
-        "bet": bet_input,
-        "result": result,
-        "bankroll": st.session_state.bankroll
-    })
+def capture():
+    screenshot = pyautogui.screenshot(region=REGION)
+    img = np.array(screenshot)
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    return img
 
-    save_data({
-        "bankroll": st.session_state.bankroll,
-        "history": st.session_state.history
-    })
+# -------------------------
 
-    st.success("Mentve!")
+def loop():
+    global bankroll
 
-# -----------------------
-# LIMIT CHECK
-# -----------------------
-profit = st.session_state.bankroll - 10000
+    while running:
+        img = capture()
+        value = extract_number(img)
 
-if profit <= stop_loss:
-    st.error("🛑 Stop Loss elérve! Állj meg!")
-if profit >= take_profit:
-    st.success("💰 Cél elérve! Érdemes kiszállni!")
+        if value:
+            history.append(value)
 
-# -----------------------
-# STATS
-# -----------------------
-st.divider()
-st.subheader("📊 Statisztika")
+            signal, color = get_signal()
 
-if st.session_state.history:
-    bankrolls = [h["bankroll"] for h in st.session_state.history]
-    st.line_chart(bankrolls)
+            crash_var.set(f"{value:.2f}")
+            signal_var.set(signal)
+            signal_label.config(fg=color)
 
-    wins_total = sum(1 for h in st.session_state.history if h["result"] == "Nyertem")
-    total = len(st.session_state.history)
+            if signal == "🟢":
+                bankroll += 200
+            elif signal == "🔴":
+                bankroll -= 200
 
-    st.write(f"Win rate: {round((wins_total/total)*100,1)}%")
-    st.write(f"Körök száma: {total}")
+            bank_var.set(f"{bankroll} Ft")
 
-# -----------------------
-# RESET
-# -----------------------
-st.divider()
-if st.button("🔄 Reset"):
-    st.session_state.bankroll = 10000
-    st.session_state.history = []
-    save_data({"bankroll": 10000, "history": []})
-    st.warning("Adatok törölve!")
+            if bankroll <= stop_loss:
+                signal_var.set("STOP")
+                signal_label.config(fg="red")
+
+        time.sleep(2)
+
+# -------------------------
+
+def start_move(event):
+    root.x = event.x
+    root.y = event.y
+
+def on_motion(event):
+    x = root.winfo_pointerx() - root.x
+    y = root.winfo_pointery() - root.y
+    root.geometry(f"+{x}+{y}")
+
+# -------------------------
+
+root = tk.Tk()
+root.overrideredirect(True)
+root.attributes("-topmost", True)
+root.attributes("-alpha", 0.9)
+root.configure(bg="black")
+
+crash_var = tk.StringVar(value="--")
+signal_var = tk.StringVar(value="WAIT")
+bank_var = tk.StringVar(value=f"{bankroll} Ft")
+
+frame = tk.Frame(root, bg="black")
+frame.pack(padx=10, pady=10)
+
+tk.Label(frame, textvariable=crash_var, fg="cyan", bg="black", font=("Arial", 20)).pack()
+
+signal_label = tk.Label(frame, textvariable=signal_var, fg="white", bg="black", font=("Arial", 18))
+signal_label.pack()
+
+tk.Label(frame, textvariable=bank_var, fg="white", bg="black", font=("Arial", 12)).pack()
+
+frame.bind("<Button-1>", start_move)
+frame.bind("<B1-Motion>", on_motion)
+
+threading.Thread(target=loop, daemon=True).start()
+
+root.mainloop()
+
+
+    
