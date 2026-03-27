@@ -1,0 +1,1 @@
+# szpinmisike-crypto-smart-bet-app
